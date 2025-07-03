@@ -12,6 +12,7 @@ This document provides comprehensive information about building Claude Code as s
 - [Platform-Specific Notes](#platform-specific-notes)
 - [Troubleshooting](#troubleshooting)
 - [Windows-Specific Fixes](#windows-specific-fixes)
+  - [Import.meta Module Error Fix](#import.meta-module-error-fix)
   - [POSIX Shell Bypass](#posix-shell-bypass)
   - [Ripgrep Windows Fixes](#ripgrep-windows-fixes)
   - [Windows ARM64 Support](#windows-arm64-support)
@@ -274,6 +275,85 @@ otool -L claude-code-macos-arm64  # macOS
 ```
 
 ## Windows-Specific Fixes
+
+### Import.meta Module Error Fix
+
+#### Problem Solved
+
+Windows executables were failing with the error:
+```
+SyntaxError: import.meta is only valid inside modules.
+```
+
+This occurred because Bun wraps ES module code in a CommonJS-style function when compiling Windows executables:
+```javascript
+(function(exports, require, module, __filename, __dirname) { 
+    // ... ES module code here
+})
+```
+
+Since `import.meta` is an ES module feature that's not valid inside CommonJS contexts, and the codebase uses `import.meta.url` in multiple places, Windows builds would fail immediately.
+
+#### Solution Implemented
+
+A Windows-specific build preparation script (`scripts/build/prepare-windows-bundle.js`) was created that:
+
+1. **Replaces all `import.meta.url` references** with runtime-compatible alternatives:
+   ```javascript
+   // Before:
+   import.meta.url
+   
+   // After:
+   (typeof __filename !== 'undefined' ? 'file://' + __filename.replace(/\\/g, '/') : 'file:///')
+   ```
+
+2. **Handles `fileURLToPath(import.meta.url)` patterns**:
+   ```javascript
+   // Before:
+   fileURLToPath(import.meta.url)
+   
+   // After:
+   (typeof __filename !== 'undefined' ? __filename : process.argv[1] || '.')
+   ```
+
+3. **Adds Windows-specific compatibility wrappers** to ensure `__filename` and `__dirname` are available in the bundled context
+
+4. **Preserves embedded file handling** for yoga.wasm and ripgrep binaries
+
+5. **Integrates with the POSIX shell bypass** (see next section)
+
+#### Build Process Integration
+
+The main build script automatically uses the Windows-specific preparation for Windows targets:
+- Separates Windows and non-Windows builds
+- Runs `prepare-windows-bundle.js` for Windows executables
+- Cleans up temporary build directories after completion
+
+#### Testing the Fix
+
+The fix ensures that:
+- Windows executables compile without import.meta errors
+- All functionality is preserved including embedded assets  
+- All Windows variants (baseline, modern, standard) work correctly
+
+#### Expected Results
+
+After the fixes, running `Bash(rg --version)` should output:
+```
+ripgrep X.X.X
+```
+
+Instead of the previous error:
+```
+Error: undefined is not an object (evaluating '$.includes')
+```
+
+#### Additional Notes
+
+- The bytecode compilation still fails for complex bundled code, but this is expected
+- The executables are built successfully without bytecode
+- All Windows variants (standard, baseline, modern) should now work correctly
+- The fix ensures compatibility with Windows ARM64 x64 emulation environments
 
 ### POSIX Shell Bypass
 
@@ -595,4 +675,4 @@ See the main LICENSE file in the repository root.
 
 ---
 
-*Generated executables include the Bun runtime, which is licensed under MIT.* 
+*Generated executables include the Bun runtime, which is licensed under MIT.*

@@ -74,11 +74,18 @@ async function prepareBundle() {
   await runCommand('bun', ['run', 'scripts/build/prepare-bundle-native.js']);
 }
 
-async function buildExecutable(target, output) {
+async function prepareWindowsBundle() {
+  console.log('\nPreparing Windows-specific bundle...');
+  await runCommand('bun', ['run', 'scripts/build/prepare-windows-bundle.js']);
+}
+
+async function buildExecutable(target, output, isWindows = false) {
   console.log(`\nBuilding ${output}...`);
   const startTime = Date.now();
   
   try {
+    const sourceFile = isWindows ? '.windows-build-temp/cli-windows.js' : './cli-native-bundled.js';
+    
     await runCommand('bun', [
       'build',
       '--compile',
@@ -86,7 +93,7 @@ async function buildExecutable(target, output) {
       '--sourcemap',     // Embed sourcemap for debugging
       // '--bytecode',   // Commented out - experimental feature that often fails
       `--target=${target}`,
-      './cli-native-bundled.js',
+      sourceFile,
       `--outfile=dist/${output}`
     ]);
     
@@ -105,6 +112,12 @@ async function cleanupBundledFile() {
       await rm(file);
     }
   }
+  
+  // Also clean up Windows temp directory
+  if (existsSync('.windows-build-temp')) {
+    await rm('.windows-build-temp', { recursive: true, force: true });
+  }
+  
   console.log('\n✓ Cleaned up temporary files');
 }
 
@@ -170,17 +183,39 @@ async function main() {
   const startTime = Date.now();
   
   try {
-    // Prepare the bundle once with native embedding
-    await prepareBundle();
+    // Separate Windows and non-Windows builds
+    const windowsPlatforms = platformsToBuild.filter(p => p.target.includes('windows'));
+    const otherPlatforms = platformsToBuild.filter(p => !p.target.includes('windows'));
     
-    // Build executables sequentially to avoid resource conflicts
     let successCount = 0;
-    for (const platform of platformsToBuild) {
-      try {
-        await buildExecutable(platform.target, platform.output);
-        successCount++;
-      } catch (error) {
-        console.error(`Failed to build ${platform.output}:`, error.message);
+    
+    // Build non-Windows platforms first
+    if (otherPlatforms.length > 0) {
+      // Prepare the bundle once with native embedding
+      await prepareBundle();
+      
+      for (const platform of otherPlatforms) {
+        try {
+          await buildExecutable(platform.target, platform.output, false);
+          successCount++;
+        } catch (error) {
+          console.error(`Failed to build ${platform.output}:`, error.message);
+        }
+      }
+    }
+    
+    // Build Windows platforms with special handling
+    if (windowsPlatforms.length > 0) {
+      // Prepare Windows-specific bundle
+      await prepareWindowsBundle();
+      
+      for (const platform of windowsPlatforms) {
+        try {
+          await buildExecutable(platform.target, platform.output, true);
+          successCount++;
+        } catch (error) {
+          console.error(`Failed to build ${platform.output}:`, error.message);
+        }
       }
     }
     
@@ -192,6 +227,7 @@ async function main() {
     console.log('- Modern variants require CPUs from 2013+ (AVX2 support)');
     console.log('- Baseline variants support older CPUs (pre-2013)');
     console.log('- Musl variants are for Alpine Linux and similar distributions');
+    console.log('- Windows builds have special handling for import.meta compatibility');
     console.log('- All executables are optimized with minification and sourcemaps');
   } finally {
     // Clean up temporary files
