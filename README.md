@@ -11,7 +11,13 @@ This document provides comprehensive information about building Claude Code as s
 - [Distribution Matrix](#distribution-matrix)
 - [Platform-Specific Notes](#platform-specific-notes)
 - [Troubleshooting](#troubleshooting)
+- [Windows-Specific Fixes](#windows-specific-fixes)
+  - [POSIX Shell Bypass](#posix-shell-bypass)
+  - [Ripgrep Windows Fixes](#ripgrep-windows-fixes)
+  - [Windows ARM64 Support](#windows-arm64-support)
 - [Technical Details](#technical-details)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Overview
 
@@ -91,26 +97,26 @@ bun install
 
 ```bash
 # Build for current platform only
-bun run build-executables.js current
+bun run scripts/build/build-executables.js current
 
 # Build all platforms
-bun run build-executables.js all
+bun run scripts/build/build-executables.js all
 
 # Build specific platform family
-bun run build-executables.js linux    # All Linux variants
-bun run build-executables.js macos    # All macOS variants
-bun run build-executables.js windows  # All Windows variants
+bun run scripts/build/build-executables.js linux    # All Linux variants
+bun run scripts/build/build-executables.js macos    # All macOS variants
+bun run scripts/build/build-executables.js windows  # All Windows variants
 ```
 
 ### Build Scripts
 
-#### `prepare-bundle-native.js`
+#### `scripts/build/prepare-bundle-native.js`
 Prepares the CLI source for bundling by:
 - Embedding yoga.wasm as base64 or native import
 - Adding embedded file mappings for ripgrep binaries
 - Modifying file loading paths to use embedded resources
 
-#### `build-executables.js`
+#### `scripts/build/build-executables.js`
 Main build orchestrator that:
 - Runs the preparation script
 - Executes Bun build with appropriate flags
@@ -267,6 +273,255 @@ otool -L claude-code-macos-arm64  # macOS
 ./claude-code-linux-x64 --print "Hello"
 ```
 
+## Windows-Specific Fixes
+
+### POSIX Shell Bypass
+
+#### Problem Solved
+
+Claude Code previously required a POSIX-compliant shell (like Git Bash, WSL, MSYS2, or Cygwin) to run on Windows. Without one of these shells installed, users would get the error:
+
+```
+No suitable shell found. Claude CLI requires a Posix shell environment. Please ensure you have a valid shell installed and the SHELL environment variable set.
+```
+
+#### Solution Implemented
+
+The POSIX shell requirement has been completely bypassed in the bundled executables. The patch modifies the shell validation logic to:
+
+1. **Still attempt to find a suitable shell** using the original logic
+2. **If no shell is found**, instead of throwing an error, it automatically assigns:
+   - `cmd.exe` on Windows
+   - `/bin/sh` on Unix-like systems
+
+#### Technical Implementation
+
+In `scripts/build/prepare-bundle-native.js`, a patch was added that replaces:
+
+```javascript
+let J=W.find((F)=>F&&cw0(F));
+if(!J){
+  let F="No suitable shell found. Claude CLI requires a Posix shell environment...";
+  throw h1(new Error(F)),new Error(F)
+}
+```
+
+With:
+
+```javascript
+let J=W.find((F)=>F&&cw0(F));
+if(!J){
+  J=process.platform==="win32"?"cmd.exe":"/bin/sh"
+}
+```
+
+#### Benefits
+
+1. **No Dependencies**: Windows users no longer need to install Git Bash, WSL, or any POSIX shell
+2. **Works Out-of-the-Box**: Claude Code executables now run on ANY Windows system
+3. **Backwards Compatible**: If a POSIX shell IS available, it will still be used
+4. **Cross-Platform**: The bypass works on all platforms, not just Windows
+
+#### Testing Shell Bypass
+
+Two test scripts are provided in `scripts/test/`:
+
+**Batch Script:**
+```batch
+scripts\test\test-shell-bypass.bat
+```
+
+**PowerShell Script:**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\test\test-shell-bypass.ps1
+```
+
+These scripts:
+- Clear the SHELL environment variable
+- Test all Windows executable variants
+- Verify they work without any POSIX shell installed
+
+#### Important Notes
+
+1. This bypass only applies to **bundled executables**, not the source code version
+2. Some shell-specific features may work differently with `cmd.exe` vs. a POSIX shell
+3. The bypass ensures basic functionality works on all systems
+4. Advanced users can still set the SHELL environment variable to use their preferred shell
+
+### Ripgrep Windows Fixes
+
+#### Issues Fixed
+
+##### 1. Yoga.wasm Loading Syntax Error
+**Problem**: Top-level `await` in the yoga.wasm loading code caused bytecode compilation failures.
+
+**Solution**: Wrapped the async operation in an IIFE to ensure proper async context.
+
+##### 2. Ripgrep "$.includes" Error
+**Problem**: `undefined is not an object (evaluating '$.includes')` error when running `rg --version` on Windows ARM64 emulation.
+
+**Root Cause**: Template literal syntax with escaped backticks in minified code was causing issues with variable interpolation.
+
+**Solution**: 
+- Replaced template literals with string concatenation
+- Added defensive checks for undefined values
+- Created a safe platform detection helper function
+- Added try-catch blocks with proper error handling
+
+#### Changes Made
+
+In `scripts/build/prepare-bundle-native.js`:
+1. Added `__getSafePlatform()` helper function for safe platform detection
+2. Replaced template literals (`\`${var}\``) with string concatenation (`"string" + var`)
+3. Added defensive checks for `process`, `process.arch`, and `process.platform`
+4. Added proper error handling with try-catch blocks
+5. Added checks for `__embeddedFiles` existence before accessing
+
+#### Testing Ripgrep Fixes
+
+Two test scripts are provided in `scripts/test/`:
+
+**Batch Script:**
+```batch
+scripts\test\test-ripgrep-windows.bat
+```
+
+**PowerShell Script:**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\test\test-ripgrep-windows.ps1
+```
+
+#### Expected Results
+
+After the fixes, running `Bash(rg --version)` should output:
+```
+ripgrep X.X.X
+```
+
+Instead of the previous error:
+```
+Error: undefined is not an object (evaluating '$.includes')
+```
+
+#### Additional Notes
+
+- The bytecode compilation still fails for complex bundled code, but this is expected
+- The executables are built successfully without bytecode
+- All Windows variants (standard, baseline, modern) should now work correctly
+- The fix ensures compatibility with Windows ARM64 x64 emulation environments
+
+### Windows ARM64 Support
+
+Your Windows 11 ARM64 system should be able to run x64 binaries through emulation, but the Claude Code executable may fail silently. Here's how to diagnose and potentially fix the issue.
+
+#### Quick Tests
+
+1. **Copy the debug scripts** to your Windows VM:
+   - `scripts/debug/debug-windows-arm64.bat` 
+   - `scripts/debug/debug-arm64.ps1`
+
+2. **Run the batch file first**:
+   ```cmd
+   cd C:\path\to\your\dist
+   ..\scripts\debug\debug-windows-arm64.bat
+   ```
+
+3. **Run the PowerShell script** for more details:
+   ```powershell
+   cd C:\path\to\your\dist
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+   ..\scripts\debug\debug-arm64.ps1
+   ```
+
+#### Common Issues and Solutions
+
+##### Issue 1: x64 Emulation Not Working
+Windows 11 ARM64 should have x64 emulation enabled by default, but sometimes it needs configuration.
+
+**Check if x64 emulation is enabled:**
+1. Open Registry Editor (regedit)
+2. Navigate to: `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options`
+3. Look for any entries that might disable x64 emulation
+
+##### Issue 2: Missing Visual C++ Redistributables
+The Bun runtime might need Visual C++ redistributables that aren't included in the ARM64 emulation layer.
+
+**Install both ARM64 and x64 versions:**
+1. Download from Microsoft:
+   - [VC++ Redistributables x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+   - [VC++ Redistributables ARM64](https://aka.ms/vs/17/release/vc_redist.arm64.exe)
+2. Install both versions
+
+##### Issue 3: Node.js Native Modules
+The ripgrep.node native module might not work under x64 emulation.
+
+**Test without ripgrep:**
+Create a simple test to see if it's the native modules causing issues:
+```powershell
+# Set environment variable to disable ripgrep
+$env:DISABLE_RIPGREP = "1"
+.\claude-code-windows-x64.exe --help
+```
+
+##### Issue 4: Bun Runtime Incompatibility
+Bun's runtime might have specific issues with Windows ARM64 x64 emulation.
+
+**Alternative approaches:**
+1. **Use Wine in WSL2** (if UTM supports nested virtualization):
+   ```bash
+   # In WSL2 on your Windows ARM64 VM
+   sudo apt update
+   sudo apt install wine64
+   wine64 claude-code-windows-x64.exe --help
+   ```
+
+2. **Build from source** (requires Node.js):
+   ```powershell
+   # Install Node.js for ARM64 Windows first
+   npm install -g @anthropic-ai/claude-code
+   claude --help
+   ```
+
+#### Diagnostic Commands
+
+Run these in PowerShell to gather more info:
+
+```powershell
+# Check x64 emulation status
+Get-AppxPackage | Where-Object {$_.Name -like "*x64*"}
+
+# Check Windows version and features
+winver
+Get-WindowsOptionalFeature -Online | Where-Object {$_.FeatureName -like "*Hyper*" -or $_.FeatureName -like "*x64*"}
+
+# Check for crash dumps
+Get-ChildItem "$env:LOCALAPPDATA\CrashDumps" -Filter "claude-code*.dmp" -ErrorAction SilentlyContinue
+
+# Test a simple x64 binary (download any small x64 tool to test)
+# This helps determine if it's a general x64 emulation issue or Bun-specific
+```
+
+#### If Nothing Works
+
+Since neither Bun nor ripgrep provide native Windows ARM64 binaries, your options are limited:
+
+1. **Use the macOS or Linux version** in UTM instead of Windows
+2. **Wait for native support** - Monitor:
+   - [Bun Windows ARM64 issue](https://github.com/oven-sh/bun/issues/43)
+   - [Ripgrep releases](https://github.com/BurntSushi/ripgrep/releases)
+3. **Use an x64 Windows VM** instead of ARM64 (will be slower due to full CPU emulation)
+
+#### Report Back
+
+After running the diagnostic scripts, please share:
+1. The output from both scripts
+2. Any error messages from Event Viewer
+3. Whether other x64 programs work on your system
+
+This will help determine if it's a Bun-specific issue or a general x64 emulation problem.
+
 ## Technical Details
 
 ### Embedded Assets
@@ -322,7 +577,7 @@ Typical build times on Apple M1:
 To add support for new platforms:
 
 1. Check Bun's supported targets: `bun build --compile --help`
-2. Add target configuration to `PLATFORMS` in `build-executables.js`
+2. Add target configuration to `PLATFORMS` in `scripts/build/build-executables.js`
 3. Test the build thoroughly
 4. Update this documentation
 
