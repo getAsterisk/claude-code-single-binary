@@ -84,7 +84,7 @@ async function buildExecutable(target, output) {
       '--compile',
       '--minify',        // Optimize size
       '--sourcemap',     // Embed sourcemap for debugging
-      '--bytecode',      // Enable bytecode compilation for faster startup
+      // '--bytecode',   // Commented out - experimental feature that often fails
       `--target=${target}`,
       './cli-native-bundled.js',
       `--outfile=dist/${output}`
@@ -93,21 +93,8 @@ async function buildExecutable(target, output) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✓ Built ${output} in ${elapsed}s`);
   } catch (error) {
-    // If bytecode compilation fails (experimental feature), try without it
-    console.log(`⚠️  Bytecode compilation failed for ${output}, retrying without --bytecode...`);
-    
-    await runCommand('bun', [
-      'build',
-      '--compile',
-      '--minify',
-      '--sourcemap',
-      `--target=${target}`,
-      './cli-native-bundled.js',
-      `--outfile=dist/${output}`
-    ]);
-    
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`✓ Built ${output} in ${elapsed}s (without bytecode)`);
+    // If compilation fails, throw the error
+    throw error;
   }
 }
 
@@ -179,7 +166,7 @@ async function main() {
   }
   
   console.log(`Building ${platformsToBuild.length} executable(s) with full optimizations...`);
-  console.log('Optimizations enabled: --minify --sourcemap --bytecode');
+  console.log('Optimizations enabled: --minify --sourcemap');
   const startTime = Date.now();
   
   try {
