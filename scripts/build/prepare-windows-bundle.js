@@ -104,7 +104,7 @@ function __getSafePlatform() {
     console.log('✓ Replaced yoga.wasm loading with embedded version');
   } else {
     // Try a more general pattern
-    const generalYogaPattern = /var\s+(\w+)\s*=\s*await\s+nUA\s*\(\s*await\s+VP9\s*\([^)]+\.resolve\s*\(\s*["']\.\/yoga\.wasm["']\s*\)\s*\)\s*\)/;
+    const generalYogaPattern = /var\s+(\w+)\s*=\s*await\s+nUA\s*\(\s*await\s+VP9\s*\([^)]+\.resolve\s*\(\s*["']\.\/yoga\.wasm["']\s*\)\s*\)\)/;
     if (generalYogaPattern.test(cliContent)) {
       cliContent = cliContent.replace(generalYogaPattern, (match, varName) => {
         return `var ${varName}=await(async()=>{return await nUA(await Bun.file(__embeddedYogaWasm).arrayBuffer())})()`;
@@ -194,27 +194,50 @@ let B=Db.resolve(et9,"vendor","ripgrep");`;
 function applyWindowsImportMetaFixes(content) {
   console.log('Applying Windows-specific import.meta fixes...');
   
-  // Add Windows compatibility header
+  // Add Windows compatibility header with proper absolute path handling
   const windowsCompatHeader = `
 // Windows executable compatibility - import.meta fixes
 const __isWindowsExecutable = true;
-const __executablePath = process.argv[1] || __filename || '.';
-const __executableDir = require('path').dirname(__executablePath);
+
+// Ensure we have an absolute path for __filename
+let __executablePath;
+if (process.argv[1]) {
+  const path = require('path');
+  __executablePath = path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]);
+} else {
+  // Fallback to current working directory + a dummy filename
+  __executablePath = require('path').join(process.cwd(), 'claude-code.exe');
+}
+
+// Normalize the path for Windows
+const __filename = __executablePath;
+const __dirname = require('path').dirname(__executablePath);
+
+// Create a proper file URL from absolute path
+function __toFileURL(path) {
+  const resolved = require('path').resolve(path);
+  // On Windows, we need to handle drive letters properly
+  if (process.platform === 'win32') {
+    // Convert backslashes to forward slashes and ensure proper format
+    return 'file:///' + resolved.replace(/\\\\/g, '/');
+  }
+  return 'file://' + resolved;
+}
 
 // Override import.meta polyfill
 if (typeof globalThis.__filename === 'undefined') {
-  globalThis.__filename = __executablePath;
-  globalThis.__dirname = __executableDir;
+  globalThis.__filename = __filename;
+  globalThis.__dirname = __dirname;
 }
 
 `;
 
-  // Add after embedded files code but before the rest
-  const embeddedFilesEndPattern = /}\s*\n\s*\/\/ Safe platform detection helper/;
-  if (embeddedFilesEndPattern.test(content)) {
-    content = content.replace(embeddedFilesEndPattern, (match) => {
-      return `}\n${windowsCompatHeader}// Safe platform detection helper`;
-    });
+  // Insert header right after the shebang (or at start if none)
+  const shebangMatchWin = content.match(/^#!.*\n/);
+  if (shebangMatchWin) {
+    content = shebangMatchWin[0] + windowsCompatHeader + content.substring(shebangMatchWin[0].length);
+  } else {
+    content = windowsCompatHeader + content;
   }
 
   // Pattern to match various import.meta.url usages
@@ -222,22 +245,22 @@ if (typeof globalThis.__filename === 'undefined') {
     // Direct import.meta.url usage
     {
       pattern: /import\.meta\.url/g,
-      replacement: `(typeof __filename !== 'undefined' ? 'file://' + __filename.replace(/\\\\/g, '/') : 'file:///')`
+      replacement: `__toFileURL(__filename)`
     },
     // fileURLToPath(import.meta.url) pattern
     {
       pattern: /fileURLToPath\s*\(\s*import\.meta\.url\s*\)/g,
-      replacement: `(typeof __filename !== 'undefined' ? __filename : process.argv[1] || '.')`
+      replacement: `__filename`
     },
     // Variable assignments with import.meta.url
     {
       pattern: /var\s+(\w+)\s*=\s*\w+\s*\(\s*import\.meta\.url\s*\)/g,
-      replacement: (match, varName) => `var ${varName} = (typeof __filename !== 'undefined' ? __filename : process.argv[1] || '.')`
+      replacement: (match, varName) => `var ${varName} = __filename`
     },
     // dirname(fileURLToPath(import.meta.url)) pattern
     {
       pattern: /\w+\s*\(\s*\w+\s*\(\s*import\.meta\.url\s*\)\s*\)/g,
-      replacement: `(typeof __dirname !== 'undefined' ? __dirname : process.cwd())`
+      replacement: `__dirname`
     }
   ];
   
@@ -270,21 +293,36 @@ function processSdkFile() {
   const compatWrapper = `// Windows executable compatibility wrapper
 const __windowsCompat = (() => {
   if (typeof __filename === 'undefined' && typeof process !== 'undefined') {
-    globalThis.__filename = process.argv[1] || '.';
+    // Ensure we have an absolute path
+    if (process.argv[1]) {
+      const path = require('path');
+      globalThis.__filename = path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]);
+    } else {
+      globalThis.__filename = require('path').join(process.cwd(), 'claude-code.exe');
+    }
     globalThis.__dirname = require('path').dirname(globalThis.__filename);
   }
 })();
+
+// Create a proper file URL from absolute path
+function __toFileURL(path) {
+  const resolved = require('path').resolve(path);
+  // On Windows, we need to handle drive letters properly
+  if (process.platform === 'win32') {
+    // Convert backslashes to forward slashes and ensure proper format
+    return 'file:///' + resolved.replace(/\\\\/g, '/');
+  }
+  return 'file://' + resolved;
+}
 
 `;
   
   let modifiedSdk = compatWrapper + sdkContent;
   
   // Apply import.meta replacements
-  modifiedSdk = modifiedSdk.replace(/import\.meta\.url/g, 
-    `(typeof __filename !== 'undefined' ? 'file://' + __filename.replace(/\\\\/g, '/') : 'file:///')`);
+  modifiedSdk = modifiedSdk.replace(/import\.meta\.url/g, '__toFileURL(__filename)');
   
-  modifiedSdk = modifiedSdk.replace(/fileURLToPath\s*\(\s*import\.meta\.url\s*\)/g,
-    `(typeof __filename !== 'undefined' ? __filename : process.argv[1] || '.')`);
+  modifiedSdk = modifiedSdk.replace(/fileURLToPath\s*\(\s*import\.meta\.url\s*\)/g, '__filename');
   
   // Write to temp directory
   const tempSdkPath = join(tempDir, 'sdk.mjs');
