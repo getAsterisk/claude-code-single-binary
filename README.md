@@ -285,6 +285,11 @@ Windows executables were failing with the error:
 SyntaxError: import.meta is only valid inside modules.
 ```
 
+And later, after initial fixes:
+```
+TypeError: File URL path must be an absolute path
+```
+
 This occurred because Bun wraps ES module code in a CommonJS-style function when compiling Windows executables:
 ```javascript
 (function(exports, require, module, __filename, __dirname) { 
@@ -296,64 +301,92 @@ Since `import.meta` is an ES module feature that's not valid inside CommonJS con
 
 #### Solution Implemented
 
-A Windows-specific build preparation script (`scripts/build/prepare-windows-bundle.js`) was created that:
+A Windows-specific build preparation script (`scripts/build/prepare-windows-bundle.js`) was created that applies a **two-layer patching approach**:
 
-1. **Replaces all `import.meta.url` references** with runtime-compatible alternatives:
+##### Layer 1: Native Bundle Preparations (Applied First)
+- Embeds yoga.wasm file using Bun's native file embedding
+- Embeds ripgrep binaries for all platforms
+- Handles ripgrep path resolution for embedded files
+- Bypasses POSIX shell requirement
+- Sets up all embedded file handling
+
+##### Layer 2: Windows-Specific import.meta Fixes (Applied on Top)
+
+1. **Ensures absolute paths for file URLs** to prevent "File URL path must be an absolute path" errors:
+   ```javascript
+   // Ensure we have an absolute path for __filename
+   let __executablePath;
+   if (process.argv[1]) {
+     const path = require('path');
+     __executablePath = path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]);
+   } else {
+     // Fallback to current working directory + a dummy filename
+     __executablePath = require('path').join(process.cwd(), 'claude-code.exe');
+   }
+   ```
+
+2. **Creates a helper function** for proper file URL generation:
+   ```javascript
+   function __toFileURL(path) {
+     const resolved = require('path').resolve(path);
+     // On Windows, we need to handle drive letters properly
+     if (process.platform === 'win32') {
+       // Convert backslashes to forward slashes and ensure proper format
+       return 'file:///' + resolved.replace(/\\/g, '/');
+     }
+     return 'file://' + resolved;
+   }
+   ```
+
+3. **Replaces all `import.meta.url` references** with the helper function:
    ```javascript
    // Before:
    import.meta.url
    
    // After:
-   (typeof __filename !== 'undefined' ? 'file://' + __filename.replace(/\\/g, '/') : 'file:///')
+   __toFileURL(__filename)
    ```
 
-2. **Handles `fileURLToPath(import.meta.url)` patterns**:
+4. **Handles `fileURLToPath(import.meta.url)` patterns** simply:
    ```javascript
    // Before:
    fileURLToPath(import.meta.url)
    
    // After:
-   (typeof __filename !== 'undefined' ? __filename : process.argv[1] || '.')
+   __filename
    ```
 
-3. **Adds Windows-specific compatibility wrappers** to ensure `__filename` and `__dirname` are available in the bundled context
+5. **Places compatibility code at the right location** - immediately after the shebang to ensure functions are defined before use
 
-4. **Preserves embedded file handling** for yoga.wasm and ripgrep binaries
+#### Critical Insights
 
-5. **Integrates with the POSIX shell bypass** (see next section)
+1. **Both patch layers are required**: Windows builds need ALL the native bundle preparations PLUS the import.meta fixes. The initial error was caused by replacing native preparations instead of building on top of them.
+
+2. **File URL validity**: The key issue was that `process.argv[1]` in Windows executables can be:
+   - A relative path (e.g., `.\claude-code.exe`)
+   - Just a filename (e.g., `claude-code.exe`)
+   - Undefined in some cases
+   - Or even just `.`
+   
+   This would create invalid file URLs like `file://./claude-code.exe` or `file:///`.
+
+3. **Proper file URL format**: Windows absolute paths require three slashes (`file:///C:/path`) while Unix paths use two (`file:///path`).
 
 #### Build Process Integration
 
 The main build script automatically uses the Windows-specific preparation for Windows targets:
 - Separates Windows and non-Windows builds
-- Runs `prepare-windows-bundle.js` for Windows executables
+- First runs standard native bundle preparations
+- Then applies Windows-specific import.meta fixes on top
 - Cleans up temporary build directories after completion
 
 #### Testing the Fix
 
 The fix ensures that:
 - Windows executables compile without import.meta errors
+- File URLs are always valid regardless of how the executable is invoked
 - All functionality is preserved including embedded assets  
 - All Windows variants (baseline, modern, standard) work correctly
-
-#### Expected Results
-
-After the fixes, running `Bash(rg --version)` should output:
-```
-ripgrep X.X.X
-```
-
-Instead of the previous error:
-```
-Error: undefined is not an object (evaluating '$.includes')
-```
-
-#### Additional Notes
-
-- The bytecode compilation still fails for complex bundled code, but this is expected
-- The executables are built successfully without bytecode
-- All Windows variants (standard, baseline, modern) should now work correctly
-- The fix ensures compatibility with Windows ARM64 x64 emulation environments
 
 ### POSIX Shell Bypass
 
