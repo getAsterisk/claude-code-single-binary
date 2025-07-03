@@ -57,6 +57,18 @@ const __embeddedFiles = {
 ${embeddedFilesMapping.join('\n')}
 };
 
+// Safe platform detection helper
+function __getSafePlatform() {
+  try {
+    const p = typeof process !== 'undefined' ? process : {};
+    const arch = (p.arch || 'x64').toString();
+    const platform = (p.platform || 'win32').toString();
+    return { arch, platform };
+  } catch (e) {
+    return { arch: 'x64', platform: 'win32' };
+  }
+}
+
 `;
 
 // Add imports after the shebang
@@ -94,9 +106,18 @@ if (yogaLoadPattern.test(cliContent)) {
 const ripgrepPattern = /let B=Db\.resolve\(et9,"vendor","ripgrep"\);/;
 const ripgrepReplacement = `
 if(process.env.CLAUDE_CODE_BUNDLED || typeof __embeddedFiles !== 'undefined'){
-  const platform = process.platform === "win32" ? "x64-win32" : \`\${process.arch}-\${process.platform}\`;
-  const rgKey = \`vendor/ripgrep/\${platform}/rg\${process.platform === "win32" ? ".exe" : ""}\`;
-  if(__embeddedFiles[rgKey]) return __embeddedFiles[rgKey];
+  try {
+    const safePlatform = __getSafePlatform();
+    const platform = safePlatform.platform === "win32" ? "x64-win32" : (safePlatform.arch + "-" + safePlatform.platform);
+    const rgKey = "vendor/ripgrep/" + platform + "/rg" + (safePlatform.platform === "win32" ? ".exe" : "");
+    if(typeof __embeddedFiles !== 'undefined' && __embeddedFiles && __embeddedFiles[rgKey]) {
+      return __embeddedFiles[rgKey];
+    }
+  } catch(e) {
+    if(typeof console !== 'undefined' && console.error) {
+      console.error("Error loading embedded ripgrep:", e);
+    }
+  }
 }
 let B=Db.resolve(et9,"vendor","ripgrep");`;
 
@@ -135,6 +156,30 @@ cliContent = cliContent.replace(
   /process\.env\.CLAUDE_CODE_ENTRYPOINT="cli"/,
   'process.env.CLAUDE_CODE_ENTRYPOINT="cli";process.env.CLAUDE_CODE_BUNDLED="1"'
 );
+
+// 5. Bypass POSIX shell requirement check
+// Original: Throws error if no suitable shell found
+// Replace the shell validation to always succeed
+const shellCheckPattern = /let J=W\.find\(\(F\)=>F&&cw0\(F\)\);if\(!J\)\{let F="No suitable shell found\. Claude CLI requires a Posix shell environment\. Please ensure you have a valid shell installed and the SHELL environment variable set\.";throw h1\(new Error\(F\)\),new Error\(F\)\}/;
+
+// Simple replacement that always provides a shell
+const shellCheckReplacement = `let J=W.find((F)=>F&&cw0(F));if(!J){J=process.platform==="win32"?"cmd.exe":"/bin/sh"}`;
+
+if (shellCheckPattern.test(cliContent)) {
+  cliContent = cliContent.replace(shellCheckPattern, shellCheckReplacement);
+  console.log('✓ Bypassed POSIX shell requirement check');
+} else {
+  console.warn('Warning: Could not find POSIX shell check pattern - trying alternative approach');
+  
+  // Alternative: Replace just the error throwing part
+  const altPattern = /if\(!J\)\{let F="No suitable shell found\. Claude CLI requires a Posix shell environment\. Please ensure you have a valid shell installed and the SHELL environment variable set\.";throw h1\(new Error\(F\)\),new Error\(F\)\}/;
+  const altReplacement = 'if(!J){J=process.platform==="win32"?"cmd.exe":"/bin/sh"}';
+  
+  if (altPattern.test(cliContent)) {
+    cliContent = cliContent.replace(altPattern, altReplacement);
+    console.log('✓ Bypassed POSIX shell requirement check (alternative method)');
+  }
+}
 
 // Write the modified content
 const outputPath = './cli-native-bundled.js';
