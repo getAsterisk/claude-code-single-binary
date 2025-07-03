@@ -104,7 +104,7 @@ function __getSafePlatform() {
     console.log('✓ Replaced yoga.wasm loading with embedded version');
   } else {
     // Try a more general pattern
-    const generalYogaPattern = /var\s+(\w+)\s*=\s*await\s+nUA\s*\(\s*await\s+VP9\s*\([^)]+\.resolve\s*\(\s*["']\.\/yoga\.wasm["']\s*\)\s*\)\)/;
+    const generalYogaPattern = /var\s+(\w+)\s*=\s*await\s+nUA\s*\(\s*await\s+VP9\s*\([^)]+\.resolve\s*\(\s*["']\.\/yoga\.wasm["']\s*\)\)/;
     if (generalYogaPattern.test(cliContent)) {
       cliContent = cliContent.replace(generalYogaPattern, (match, varName) => {
         return `var ${varName}=await(async()=>{return await nUA(await Bun.file(__embeddedYogaWasm).arrayBuffer())})()`;
@@ -230,6 +230,19 @@ if (typeof globalThis.__filename === 'undefined') {
   globalThis.__dirname = __dirname;
 }
 
+// Override shell-quote to emit cmd.exe compatible double-quoted strings
+try {
+  const shellQuote = require('shell-quote');
+  shellQuote.quote = function(args) {
+    return args.map(arg => {
+      if (['<','>','|','&&','&'].includes(arg)) return arg;
+      const escaped = String(arg).replace(/"/g, '""');
+      return '"' + escaped + '"';
+    }).join(' ');
+  };
+  console.log('✓ Patched shell-quote to use Windows double-quote escaping');
+} catch {}
+
 `;
 
   // Insert header right after the shebang (or at start if none)
@@ -277,6 +290,15 @@ if (typeof globalThis.__filename === 'undefined') {
     'process.env.CLAUDE_CODE_BUNDLED="1";process.env.CLAUDE_CODE_WINDOWS_EXECUTABLE="1"'
   );
 
+  // Windows shell command fixes: convert POSIX bits to cmd.exe friendly ones
+  content = content
+    .replace(/"\/dev\/null"/g, '"NUL"')
+    .replace(/source \$\{Y\}/g, 'REM source ${Y}')
+    .replace(/eval \$\{F\}/g, '${F}')
+    .replace(/pwd -P >\| \$\{J\}/g, 'cd > ${J}');
+  
+  console.log('✓ Converted POSIX shell script fragments to cmd.exe compatible forms');
+  
   return content;
 }
 
