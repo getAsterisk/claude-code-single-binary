@@ -458,7 +458,12 @@ These scripts:
 #### Important Notes
 
 1. This bypass only applies to **bundled executables**, not the source code version
-2. Some shell-specific features may work differently with `cmd.exe` vs. a POSIX shell
+2. Commands are now translated from POSIX to Windows syntax when using `cmd.exe`:
+   - Single quotes → Double quotes
+   - `/dev/null` → `NUL`
+   - `source` commands → Commented out
+   - `eval` → Direct execution
+   - `pwd -P` → `cd` (current directory)
 3. The bypass ensures basic functionality works on all systems
 4. Advanced users can still set the SHELL environment variable to use their preferred shell
 
@@ -482,14 +487,35 @@ These scripts:
 - Created a safe platform detection helper function
 - Added try-catch blocks with proper error handling
 
+##### 3. Windows Shell Incompatibility
+**Problem**: Even with the POSIX shell bypass, ripgrep commands would fail with errors like:
+```
+'laude-f60c-cwd"' is not recognized as an internal or external command
+```
+
+**Root Cause**: The command builder was generating POSIX shell syntax (single quotes, `/dev/null`, `source`, `eval`, etc.) but passing it to `cmd.exe`, which doesn't understand these constructs.
+
+**Solution**: Added Windows command translation in `scripts/build/prepare-windows-bundle.js`:
+- Convert `/dev/null` → `NUL` (Windows null device)
+- Convert `source ${Y}` → `REM source ${Y}` (comment out)
+- Convert `eval ${F}` → `${F}` (direct execution)
+- Convert `pwd -P >| ${J}` → `cd > ${J}` (current directory)
+- Override `shell-quote` to use Windows double-quote escaping instead of single quotes
+- Leave shell metacharacters (`<`, `>`, `|`, `&&`) unquoted for cmd.exe
+
 #### Changes Made
 
 In `scripts/build/prepare-bundle-native.js`:
 1. Added `__getSafePlatform()` helper function for safe platform detection
-2. Replaced template literals (`\`${var}\``) with string concatenation (`"string" + var`)
+2. Replaced template literals with string concatenation
 3. Added defensive checks for `process`, `process.arch`, and `process.platform`
 4. Added proper error handling with try-catch blocks
 5. Added checks for `__embeddedFiles` existence before accessing
+
+In `scripts/build/prepare-windows-bundle.js`:
+1. Added Windows shell command translation layer
+2. Overrode `shell-quote` module to produce cmd.exe-compatible quoting
+3. Converted POSIX shell constructs to Windows equivalents
 
 #### Testing Ripgrep Fixes
 
@@ -513,10 +539,7 @@ After the fixes, running `Bash(rg --version)` should output:
 ripgrep X.X.X
 ```
 
-Instead of the previous error:
-```
-Error: undefined is not an object (evaluating '$.includes')
-```
+And searching with `Bash(rg "hello" "C:\Users\Rob Banks\Downloads")` now works correctly without requiring a POSIX shell.
 
 #### Additional Notes
 
@@ -524,6 +547,7 @@ Error: undefined is not an object (evaluating '$.includes')
 - The executables are built successfully without bytecode
 - All Windows variants (standard, baseline, modern) should now work correctly
 - The fix ensures compatibility with Windows ARM64 x64 emulation environments
+- Ripgrep now works with plain `cmd.exe` without requiring Git Bash or WSL
 
 ### Windows ARM64 Support
 
